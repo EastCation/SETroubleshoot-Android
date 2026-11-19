@@ -1,0 +1,98 @@
+name: Build
+
+on:
+  push:
+    branches: [ '**' ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        run: |
+          set +o pipefail
+          yes | sdkmanager --licenses > /dev/null
+
+      - name: Install Android SDK packages
+        run: sdkmanager "platform-tools" "platforms;android-36.1" "build-tools;36.1.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Run unit tests, lint and build
+        run: ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: SETroubleshoot-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Prepare release files
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'))
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            NAME="SETroubleshoot-${GITHUB_REF_NAME}-debug.apk"
+          else
+            NAME="SETroubleshoot-latest-debug.apk"
+          fi
+          cp app/build/outputs/apk/debug/app-debug.apk "$NAME"
+          sha256sum "$NAME" > checksums.txt
+          cat checksums.txt
+
+      - name: Publish tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          files: |
+            SETroubleshoot-*-debug.apk
+            checksums.txt
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+      - name: Publish latest build
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        continue-on-error: true
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          body: |
+            Automated debug build from `${{ github.sha }}` on `${{ github.ref_name }}`.
+
+            This APK is signed with the Android debug key. Install it manually on a rooted device.
+          prerelease: true
+          make_latest: false
+          files: |
+            SETroubleshoot-*-debug.apk
+            checksums.txt
+          fail_on_unmatched_files: true
